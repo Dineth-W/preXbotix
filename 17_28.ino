@@ -1,3 +1,4 @@
+```cpp
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -25,8 +26,8 @@ const char* password = "not123456";
 // Motor base speed
 int baseSpeed = 80;  // normal speed
 
-// Line detection mode
-bool LINE_IS_BLACK = true;
+// Line detection mode (black=0, white=1)
+bool LINE_IS_BLACK = false;
 
 // PID parameters
 float Kp = 40;
@@ -44,11 +45,11 @@ int turnTimeout = 1000; // max turn duration in ms
 // ================== Functions ==================
 int readSensors() {
   int value = 0;
-  value |= (digitalRead(S1) == LINE_IS_BLACK ? 1 : 0) << 4;
-  value |= (digitalRead(S2) == LINE_IS_BLACK ? 1 : 0) << 3;
-  value |= (digitalRead(S3) == LINE_IS_BLACK ? 1 : 0) << 2;
-  value |= (digitalRead(S4) == LINE_IS_BLACK ? 1 : 0) << 1;
-  value |= (digitalRead(S5) == LINE_IS_BLACK ? 1 : 0) << 0;
+  value |= (digitalRead(S1) == LINE_IS_BLACK ? 0 : 1) << 4;
+  value |= (digitalRead(S2) == LINE_IS_BLACK ? 0 : 1) << 3;
+  value |= (digitalRead(S3) == LINE_IS_BLACK ? 0 : 1) << 2;
+  value |= (digitalRead(S4) == LINE_IS_BLACK ? 0 : 1) << 1;
+  value |= (digitalRead(S5) == LINE_IS_BLACK ? 0 : 1) << 0;
   return value;
 }
 
@@ -119,7 +120,7 @@ void uTurn() {
 void autoDetectLineColor() {
   static int lostCount = 0;
   int mid = digitalRead(S3);
-  if(mid != LINE_IS_BLACK) lostCount++;
+  if(mid == LINE_IS_BLACK) lostCount++;
   else lostCount = 0;
   if(lostCount > 5) { LINE_IS_BLACK = !LINE_IS_BLACK; lostCount = 0; }
 }
@@ -178,3 +179,4 @@ void loop() {
       break;
   }
 }
+```
