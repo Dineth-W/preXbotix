@@ -1,11 +1,11 @@
 // Pin definitions
-const int sensorPins[5] = { 4, 5, 18, 19, 21 }; // 5 TCRT5000 digital outputs connected to these GPIOs
-const int motorA_PWM = 14;  // TB6612 PWM pin motor A
-const int motorA_IN1 = 27;  // TB6612 IN1
-const int motorA_IN2 = 26;  // TB6612 IN2
-const int motorB_PWM = 25;  // TB6612 PWM pin motor B
-const int motorB_IN3 = 33;  // TB6612 IN3
-const int motorB_IN4 = 32;  // TB6612 IN4
+const int sensorPins[5] = { 23, 22, 21, 19, 18 }; // 5 TCRT5000 digital outputs connected to these GPIOs
+const int motorA_PWM = 13;  // TB6612 PWM pin motor A
+const int motorA_IN1 = 14;  // TB6612 IN1
+const int motorA_IN2 = 12;  // TB6612 IN2
+const int motorB_PWM = 33;  // TB6612 PWM pin motor B
+const int motorB_IN3 = 26;  // TB6612 IN3
+const int motorB_IN4 = 25;  // TB6612 IN4
 
 // PID tuning parameters (tune these experimentally)
 float Kp = 0.12;
