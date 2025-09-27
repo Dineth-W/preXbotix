@@ -109,27 +109,50 @@ bool isCircle(int sensors) {
 
 void handleFeatures(int sensors) {
   if (isTJunction(sensors)) {
+    // Stop briefly
     setMotors(0, 0);
-    delay(100);
-    // example: always turn right at T-junction
-    setMotors(baseSpeed, -baseSpeed);
-    delay(300);
-  } else if (isCross(sensors)) {
-    // cross detected, go straight
+    delay(50);
+
+    // Turn right until line detected
+    setMotors(baseSpeed, -baseSpeed); // right turn
+    while (true) {
+      int s = readSensors();
+      if (s == 0b00100 || s == 0b01100 || s == 0b00110) break;
+    }
+    setMotors(0, 0);
+    delay(50);
+  }
+  else if (isCross(sensors)) {
+    // Cross detected, go straight until past cross
     followLinePID();
-  } else if (isDotLine(sensors)) {
-    // slow down for dotted line
+    while (true) {
+      int s = readSensors();
+      if (s != 0b11111) break; // leave cross
+    }
+  }
+  else if (isDotLine(sensors)) {
+    // Slow down for dotted line
     followLinePID();
     delay(50);
-  } else if (isUturn(sensors)) {
-    setMotors(-baseSpeed, baseSpeed);  // U-turn
-    delay(500);
-  } else if (isCircle(sensors)) {
-    followLinePID();  // circle
-  } else {
+  }
+  else if (isUturn(sensors)) {
+    // Turn around until line detected
+    setMotors(-baseSpeed, baseSpeed); // U-turn
+    while (true) {
+      int s = readSensors();
+      if (s == 0b00100 || s == 0b01100 || s == 0b00110) break;
+    }
+    setMotors(0, 0);
+    delay(50);
+  }
+  else if (isCircle(sensors)) {
+    followLinePID();  // normal circle handling
+  }
+  else {
     followLinePID();  // normal line
   }
 }
+
 void autoDetectLineColor() {
   // Read middle sensor only
   int mid = digitalRead(S3);
