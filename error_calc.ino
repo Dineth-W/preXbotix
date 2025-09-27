@@ -49,8 +49,8 @@ void setMotors(int leftSpeed, int rightSpeed){
     analogWrite(PWMB, -rightSpeed);
   }
 }
-int s4_count = 0;
-int s4_state = 0;
+//int s4_count = 0;
+//int s4_state = 0;
 
 // int readIRHysteresis(int pin){
 //   int val = digitalRead(pin);
