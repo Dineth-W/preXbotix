@@ -3,10 +3,10 @@
 #include <ArduinoOTA.h>
 
 // ===== User WiFi Configuration =====
-const char* ssid = "💀";              
-const char* password = "not123456";  
+const char* ssid = "💀";              // <--- CHANGE THIS
+const char* password = "not123456";  // <--- CHANGE THIS
 
-// Motor pins
+
 #define AIN1 14
 #define AIN2 12
 #define PWMA 13
@@ -19,29 +19,15 @@ const char* password = "not123456";
 #define S1 23
 #define S2 22
 #define S3 21
-#define S4 19 
-#define S5 18  
+#define S4 19 //tx2
+#define S5 18  //rx2
 
 // Motor base speed
-int baseSpeed = 80;  // normal speed
+int baseSpeed = 80;  // 0-255 PWM
 
 // Line detection mode
-bool LINE_IS_BLACK = true;
+bool LINE_IS_BLACK = true;  // will auto-switch
 
-// PID parameters
-float Kp = 40;
-float Ki = 0;
-float Kd = 20;
-int lastError = 0;
-int integral = 0;
-
-// Robot states
-enum RobotState { FOLLOW, TURN_RIGHT, TURN_LEFT, UTURN, STOP };
-RobotState state = FOLLOW;
-unsigned long stateStart = 0;
-int turnTimeout = 1000; // max turn duration in ms
-
-// ================== Functions ==================
 int readSensors() {
   int value = 0;
   value |= (digitalRead(S1) == LINE_IS_BLACK ? 1 : 0) << 4;
@@ -52,31 +38,64 @@ int readSensors() {
   return value;
 }
 
+// --- Print IR sensor raw values to Serial Monitor ---
+void printIRReadings() {
+  int s1 = digitalRead(S1);
+  int s2 = digitalRead(S2);
+  int s3 = digitalRead(S3);
+  int s4 = digitalRead(S4);
+  int s5 = digitalRead(S5);
+  Serial.print("IR readings: ");
+  Serial.print(s1); Serial.print(" ");
+  Serial.print(s2); Serial.print(" ");
+  Serial.print(s3); Serial.print(" ");
+  Serial.print(s4); Serial.print(" ");
+  Serial.print(s5);
+  Serial.println();
+}
+
 void setMotors(int leftSpeed, int rightSpeed) {
   digitalWrite(STBY, HIGH);
 
-  if (leftSpeed >= 0) { digitalWrite(AIN1, HIGH); digitalWrite(AIN2, LOW); }
-  else { digitalWrite(AIN1, LOW); digitalWrite(AIN2, HIGH); leftSpeed = -leftSpeed; }
+  if (leftSpeed >= 0) {
+    digitalWrite(AIN1, HIGH);
+    digitalWrite(AIN2, LOW);
+  } else {
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, HIGH);
+    leftSpeed = -leftSpeed;
+  }
   analogWrite(PWMA, constrain(leftSpeed, 0, 255));
 
-  if (rightSpeed >= 0) { digitalWrite(BIN1, HIGH); digitalWrite(BIN2, LOW); }
-  else { digitalWrite(BIN1, LOW); digitalWrite(BIN2, HIGH); rightSpeed = -rightSpeed; }
+  if (rightSpeed >= 0) {
+    digitalWrite(BIN1, HIGH);
+    digitalWrite(BIN2, LOW);
+  } else {
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, HIGH);
+    rightSpeed = -rightSpeed;
+  }
   analogWrite(PWMB, constrain(rightSpeed, 0, 255));
 }
+float Kp = 40;
+float Ki = 0;
+float Kd = 20;
+int lastError = 0;
+int integral = 0;
 
-// PID line following
 void followLinePID() {
   int sensors = readSensors();
   int error = 0;
 
-  switch(sensors) {
+  // Assign weighted values to sensors for error calculation
+  switch (sensors) {
     case 0b00100: error = 0; break;
     case 0b01100: error = -1; break;
     case 0b11000: error = -2; break;
     case 0b00110: error = 1; break;
     case 0b00011: error = 2; break;
-    case 0b11111: error = 0; break;          // junction
-    case 0b00000: error = lastError; break;  // lost line
+    case 0b11111: error = 0; break;          // junction or circle
+    case 0b00000: error = lastError; break;  // lost line, continue previous
     default: error = lastError; break;
   }
 
@@ -89,92 +108,118 @@ void followLinePID() {
   int rightSpeed = baseSpeed - correction;
   setMotors(leftSpeed, rightSpeed);
 }
-
-// Flexible junction detection
-bool isJunction(int sensors) {
-  int count = 0;
-  for(int i=0;i<5;i++) if(sensors & (1<<i)) count++;
-  return count >= 3; // 3+ sensors active -> junction
+bool isTJunction(int sensors) {
+  return sensors == 0b11100 || sensors == 0b00111;
 }
-
-// Detect U-turn (lost line)
-bool isUTurn(int sensors) {
+bool isCross(int sensors) {
+  return sensors == 0b11111;
+}
+bool isDotLine(int sensors) {
+  return sensors == 0b00010 || sensors == 0b01000;
+}
+bool isUturn(int sensors) {
   return sensors == 0b00000 && lastError != 0;
 }
-
-// Turn helpers (non-blocking)
-void turnRight() {
-  setMotors(baseSpeed, -baseSpeed);
+bool isCircle(int sensors) {
+  return sensors == 0b11111 && lastError == 0;
 }
 
-void turnLeft() {
-  setMotors(-baseSpeed, baseSpeed);
+void handleFeatures(int sensors) {
+  if (isTJunction(sensors)) {
+    // Stop briefly
+    setMotors(0, 0);
+    delay(50);
+
+    // Turn right until line detected
+    setMotors(baseSpeed, -baseSpeed); // right turn
+    while (true) {
+      int s = readSensors();
+      if (s == 0b00100 || s == 0b01100 || s == 0b00110) break;
+    }
+    setMotors(0, 0);
+    delay(50);
+  }
+  else if (isCross(sensors)) {
+    // Cross detected, go straight until past cross
+    followLinePID();
+    while (true) {
+      int s = readSensors();
+      if (s != 0b11111) break; // leave cross
+    }
+  }
+  else if (isDotLine(sensors)) {
+    // Slow down for dotted line
+    followLinePID();
+    delay(50);
+  }
+  else if (isUturn(sensors)) {
+    // Turn around until line detected
+    setMotors(-baseSpeed, baseSpeed); // U-turn
+    while (true) {
+      int s = readSensors();
+      if (s == 0b00100 || s == 0b01100 || s == 0b00110) break;
+    }
+    setMotors(0, 0);
+    delay(50);
+  }
+  else if (isCircle(sensors)) {
+    followLinePID();  // normal circle handling
+  }
+  else {
+    followLinePID();  // normal line
+  }
 }
 
-void uTurn() {
-  setMotors(-baseSpeed, baseSpeed);
-}
-
-// Auto-detect line color
 void autoDetectLineColor() {
-  static int lostCount = 0;
+  // Read middle sensor only
   int mid = digitalRead(S3);
-  if(mid != LINE_IS_BLACK) lostCount++;
+  // If lost line repeatedly, invert detection
+  static int lostCount = 0;
+  if (mid != LINE_IS_BLACK) lostCount++;
   else lostCount = 0;
-  if(lostCount > 5) { LINE_IS_BLACK = !LINE_IS_BLACK; lostCount = 0; }
+  if (lostCount > 5) {
+    LINE_IS_BLACK = !LINE_IS_BLACK;
+    lostCount = 0;
+  }
 }
-
-// ================== Setup ==================
 void setup() {
-  Serial.begin(115200);
+  // put your setup code here, to run once:
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-
   Serial.print("Connecting to WiFi");
-  while(WiFi.status() != WL_CONNECTED){ delay(500); Serial.print("."); }
-  Serial.println("\nWiFi connected: " + WiFi.localIP().toString());
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected. IP: ");
+  Serial.println(WiFi.localIP());
 
   ArduinoOTA.setHostname("esp32-linefollower");
   ArduinoOTA.begin();
-  Serial.println("OTA Ready!");
+  Serial.println("OTA Ready! You can upload new code over WiFi.");
 
-  pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT); pinMode(PWMA, OUTPUT);
-  pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT); pinMode(PWMB, OUTPUT);
+  Serial.begin(115200);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(PWMA, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+  pinMode(PWMB, OUTPUT);
   pinMode(STBY, OUTPUT);
 
-  pinMode(S1, INPUT); pinMode(S2, INPUT); pinMode(S3, INPUT); pinMode(S4, INPUT); pinMode(S5, INPUT);
+  pinMode(S1, INPUT);
+  pinMode(S2, INPUT);
+  pinMode(S3, INPUT);
+  pinMode(S4, INPUT);
+  pinMode(S5, INPUT);
 }
 
-// ================== Loop ==================
+
+
 void loop() {
   ArduinoOTA.handle();
   autoDetectLineColor();
   int sensors = readSensors();
-
-  switch(state) {
-    case FOLLOW:
-      followLinePID();
-      if(isJunction(sensors)) { state = TURN_RIGHT; stateStart = millis(); }
-      else if(isUTurn(sensors)) { state = UTURN; stateStart = millis(); }
-      break;
-
-    case TURN_RIGHT:
-      turnRight();
-      if(millis()-stateStart > turnTimeout || !isJunction(sensors)) state = FOLLOW;
-      break;
-
-    case TURN_LEFT:
-      turnLeft();
-      if(millis()-stateStart > turnTimeout || !isJunction(sensors)) state = FOLLOW;
-      break;
-
-    case UTURN:
-      uTurn();
-      if(millis()-stateStart > turnTimeout || !isUTurn(sensors)) state = FOLLOW;
-      break;
-
-    case STOP:
-      setMotors(0,0);
-      break;
-  }
+  printIRReadings(); // <-- Print IR sensor outputs each loop
+  handleFeatures(sensors);
 }
