@@ -28,6 +28,9 @@ void setup() {
   pinMode(S3, INPUT); pinMode(S4, INPUT); pinMode(S5, INPUT);
 
   Serial.begin(115200);
+
+  // --- Add startup delay of 2 seconds ---
+  delay(2000);
 }
 
 // ===== Motor control helper =====
