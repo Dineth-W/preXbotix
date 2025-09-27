@@ -3,7 +3,7 @@
 #include <ArduinoOTA.h>
 
 // ===== User WiFi Configuration =====
-const char* ssid = "💀";              
+const char* ssid = "Dineth";              
 const char* password = "not123456";  
 
 // Motor pins
