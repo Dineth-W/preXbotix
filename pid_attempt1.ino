@@ -1,135 +1,301 @@
-// Pin definitions
-const int sensorPins[5] = { 23, 22, 21, 19, 18 }; // 5 TCRT5000 digital outputs connected to these GPIOs
-const int motorA_PWM = 13;  // TB6612 PWM pin motor A
-const int motorA_IN1 = 14;  // TB6612 IN1
-const int motorA_IN2 = 12;  // TB6612 IN2
-const int motorB_PWM = 33;  // TB6612 PWM pin motor B
-const int motorB_IN3 = 26;  // TB6612 IN3
-const int motorB_IN4 = 25;  // TB6612 IN4
+// ===== Motor driver pins (TB6612FNG) =====
+#define AIN1 14
+#define AIN2 12
+#define PWMA 13
+#define BIN1 26
+#define BIN2 25
+#define PWMB 33
+#define STBY 27
 
-// PID tuning parameters (tune these experimentally)
-float Kp = 0.12;
-float Ki = 0.0;
-float Kd = 0.02;
+// ===== IR sensor pins =====
+#define S1 23   // left-most
+#define S2 22   // left-mid
+#define S3 21   // center
+#define S4 19   // right-mid
+#define S5 18   // right-most
 
-// Motor base speed PWM (0-255)
-const int baseSpeed = 160;
+// ===== Motor base speed =====
+int baseSpeed = 130;      // max speed
+int maxTurnAdjustment = 50; // max speed adjustment for turns (0-255 )    100
 
-// Variables for PID
-float lastError = 0;
+// ===== Line detection state =====
+// 0 = unknown, 1 = black line, 2 = white line
+int lineType = 0;
+
+// ===== Robot dimensions and motion params =====
+float sensorToCenter_mm = 145.0;    // distance from sensors to robot center
+float wheelDiameter_mm = 43.0;      // wheel diameter
+float wheelRadius_mm = wheelDiameter_mm/2.0;
+float motorRPM = 500.0;             // motor RPM
+float wheelCircum_mm = 3.1416 * wheelDiameter_mm;
+float speed_mm_s = (motorRPM / 60.0) * wheelCircum_mm * (baseSpeed/255.0); // rough real speed estimation
+
+// ===== Turning delay calculation =====
+// For a gentle pre-turn delay: let robot move forward about the distance from sensor to center
+int preTurnDelay_ms = int(sensorToCenter_mm / speed_mm_s * 1000); // ms
+
+// ===== PID variables =====
+float Kp = 15.0;  // Proportional gain
+float Ki = 0.0;   // Integral gain
+float Kd = 8.0;  // Derivative gain
 float integral = 0;
-unsigned long lastTime = 0;
+float lastError = 0;
 
-// For line color detection (0=black line on white, 1=white line on black)
-bool invertLogic = false;
-
-// Read sensors and return position error
-// Sensors order: Left to Right - weights are -2, -1, 0, 1, 2
-// Sensor outputs HIGH=white, LOW=black (digital)
-int readLinePosition() {
-  int sensorValues[5];
-  for (int i = 0; i < 5; i++) {
-    int val = digitalRead(sensorPins[i]);
-    // Invert logic dynamically based on line type
-    sensorValues[i] = invertLogic ? !val : val;
-  }
-  // Calculate weighted average error
-  int weightedSum = 0;
-  int sumActive = 0;
-  for (int i = 0; i < 5; i++) {
-    if (sensorValues[i] == 0) {  // sensor on line if LOW (black)
-      weightedSum += (i - 2) * 1000;
-      sumActive += 1000;
-    }
-  }
-  if (sumActive == 0) {
-    // Line lost, return large error based on last known error sign
-    return lastError > 0 ? 3000 : -3000;
-  }
-  return weightedSum / sumActive;
-}
-
-// Set motor speeds with PWM and direction
-// speed from -255 to 255, positive forward, negative backward
-void setMotorSpeed(int motorPWM, int IN1, int IN2, int speed) {
-  if (speed >= 0) {
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
-    ledcWrite(motorPWM, speed);
-  } else {
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-    ledcWrite(motorPWM, -speed);
-  }
-}
-
-// Setup function
 void setup() {
+  pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT);
+  pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
+  pinMode(STBY, OUTPUT); digitalWrite(STBY, HIGH);
+
+  pinMode(S1, INPUT); pinMode(S2, INPUT);
+  pinMode(S3, INPUT); pinMode(S4, INPUT);
+  pinMode(S5, INPUT);
+
   Serial.begin(115200);
 
-  for (int i = 0; i < 5; i++)
-    pinMode(sensorPins[i], INPUT);
+  // --- Add startup delay of 2 seconds ---
+  delay(2000);
 
-  pinMode(motorA_IN1, OUTPUT);
-  pinMode(motorA_IN2, OUTPUT);
-  pinMode(motorB_IN3, OUTPUT);
-  pinMode(motorB_IN4, OUTPUT);
-
-  ledcSetup(0, 20000, 8); // channel 0 PWM 20kHz 8-bit for motor A PWM pin
-  ledcAttachPin(motorA_PWM, 0);
-
-  ledcSetup(1, 20000, 8); // channel 1 PWM 20kHz 8-bit for motor B PWM pin
-  ledcAttachPin(motorB_PWM, 1);
-
-  lastTime = millis();
+  // --- Print calculated pre-turn delay ---
+  Serial.print("Calculated pre-turn delay (ms): ");
+  Serial.println(preTurnDelay_ms);
 }
 
-// Main loop
+// ===== Motor control helper =====
+void setMotors(int leftSpeed, int rightSpeed){
+  // left motor
+  if(leftSpeed >= 0){
+    digitalWrite(AIN1, HIGH); digitalWrite(AIN2, LOW);
+    analogWrite(PWMA, leftSpeed);
+  } else {
+    digitalWrite(AIN1, LOW); digitalWrite(AIN2, HIGH);
+    analogWrite(PWMA, -leftSpeed);
+  }
+  // right motor
+  if(rightSpeed >= 0){
+    digitalWrite(BIN1, HIGH); digitalWrite(BIN2, LOW);
+    analogWrite(PWMB, rightSpeed);
+  } else {
+    digitalWrite(BIN1, LOW); digitalWrite(BIN2, HIGH);
+    analogWrite(PWMB, -rightSpeed);
+  }
+}
+
+// ===== Determine line type =====
+void detectLineType() {
+  // If uninitialized, detect line type by sampling center sensor
+  if (lineType == 0) {
+    int white_count = 0, black_count = 0;
+    // Sample center sensor for a few cycles
+    for (int i = 0; i < 10; i++) {
+      int val = digitalRead(S3);
+      if (val == 1) white_count++;
+      else black_count++;
+      delay(10);
+    }
+    // If majority are white, assume black line on white; else white line on black
+    if (white_count > black_count) lineType = 1;
+    else lineType = 2;
+    Serial.print("Detected line type: ");
+    if (lineType == 1) Serial.println("Black line on White background");
+    else Serial.println("White line on Black background");
+  }
+}
+
+// ===== Turn in the shortest way until center sensor detects line =====
+void turnUntilCenter(int s1, int s2, int s4, int s5) {
+  int turnSpeed = 100;
+  int direction = 0;
+
+  // Decide the direction based on sensor readings
+  if ((s1 == 1 || s2 == 1) && (s4 == 0 && s5 == 0)) {
+    direction = -1; // turn left
+  } else if ((s4 == 1 || s5 == 1) && (s1 == 0 && s2 == 0)) {
+    direction = 1; // turn right
+  } else if ((s1 == 1 || s2 == 1) && (s4 == 1 || s5 == 1)) {
+    // Both sides see line, prefer left
+    direction = -1;
+  } else {
+    direction = 0; // no clear direction, stop
+  }
+
+  // Only turn if a direction is set
+  while (direction != 0) {
+    int s3 = digitalRead(S3);
+    if (lineType == 2) s3 = !s3;
+    if (s3 == 1) {
+      // Found the line, break and continue normal operation
+      break;
+    }
+    if (direction == -1) {
+      setMotors(-turnSpeed, turnSpeed); // turn left
+    } else if (direction == 1) {
+      setMotors(turnSpeed, -turnSpeed); // turn right
+    }
+    delay(20);
+  }
+  // Once found, do NOT stop motors here - let normal loop code take over
+}
+
+// ===== Spin in place until any sensor detects the line =====
+bool spinSearchForLine() {
+  int spinSpeed = 100;
+  unsigned long startTime = millis();
+  unsigned long spinDuration = 1000; // Max 1 second spin (adjust as needed)
+  while (millis() - startTime < spinDuration) {
+    setMotors(spinSpeed, -spinSpeed); // spin right
+    int s1 = digitalRead(S1);
+    int s2 = digitalRead(S2);
+    int s3 = digitalRead(S3);
+    int s4 = digitalRead(S4);
+    int s5 = digitalRead(S5);
+    if (lineType == 2) { 
+      s1 = !s1; s2 = !s2; s3 = !s3; s4 = !s4; s5 = !s5;
+    }
+    if (s1 == 1 || s2 == 1 || s3 == 1 || s4 == 1 || s5 == 1) {
+      // Found a line
+      return true;
+    }
+    delay(10);
+  }
+  setMotors(0, 0); // stop after spin
+  return false;
+}
+
 void loop() {
-  int position = readLinePosition();
+  // Read all sensors
+  int s1 = digitalRead(S1);
+  int s2 = digitalRead(S2);
+  int s3 = digitalRead(S3);
+  int s4 = digitalRead(S4);
+  int s5 = digitalRead(S5);
 
-  // PID control calculation
-  unsigned long now = millis();
-  float timeChange = (float)(now - lastTime);
-  if(timeChange == 0) timeChange = 1;
+  // Detect line type if needed (uses only S3)
+  detectLineType();
 
-  float error = (float)position;
-  integral += error * timeChange;
-  float derivative = (error - lastError) / timeChange;
+  // Auto inversion according to detected line type
+  // Sensor output: 1 = white, 0 = black
+  // For black line: 0 = line, for white line: 1 = line
+  if (lineType == 2) { 
+    s1 = !s1; s2 = !s2; s3 = !s3; s4 = !s4; s5 = !s5;
+  }
 
-  float output = Kp * error + Ki * integral + Kd * derivative;
+  // ===== No sensors see line: go forward for 500ms, then spin if still no line =====
+  if (s1 == 0 && s2 == 0 && s3 == 0 && s4 == 0 && s5 == 0) {
+    // Go forward for 500ms
+    unsigned long startTime = millis();
+    bool found = false;
+    setMotors(baseSpeed, baseSpeed);
+    while (millis() - startTime < 500) {
+      int t1 = digitalRead(S1);
+      int t2 = digitalRead(S2);
+      int t3 = digitalRead(S3);
+      int t4 = digitalRead(S4);
+      int t5 = digitalRead(S5);
+      if (lineType == 2) { 
+        t1 = !t1; t2 = !t2; t3 = !t3; t4 = !t4; t5 = !t5;
+      }
+      if (t1 == 1 || t2 == 1 || t3 == 1 || t4 == 1 || t5 == 1) {
+        found = true;
+        break;
+      }
+      delay(10);
+    }
 
-  // Motor speeds adjusted for PID output
-  int leftSpeed = baseSpeed + output;
-  int rightSpeed = baseSpeed - output;
+    // If found during forward, continue normal operation (don't stop)
+    if (found) {
+      // Proceed as normal (PID will take over at end of loop)
+    } else {
+      // If not found, spin once to search for line
+      if (spinSearchForLine()) {
+        // Found during spin, proceed as normal
+      } else {
+        // Still not found, stop
+        setMotors(0, 0);
+        delay(100);
+        return;
+      }
+    }
+    // After recovery, re-read sensors
+    s1 = digitalRead(S1);
+    s2 = digitalRead(S2);
+    s3 = digitalRead(S3);
+    s4 = digitalRead(S4);
+    s5 = digitalRead(S5);
+    if (lineType == 2) { 
+      s1 = !s1; s2 = !s2; s3 = !s3; s4 = !s4; s5 = !s5;
+    }
+  }
 
-  // Constrain PWM signals
-  leftSpeed = constrain(leftSpeed, -200, 200);
-  rightSpeed = constrain(rightSpeed, -200, 200);
+  // If center sensor does NOT see line, but either side does, pre-turn delay then turn until center sees line again
+  // Now, check using all sensors for off-track detection
+  if (s3 == 0) { // off track
+    if ((s1 == 1 || s2 == 1) && (s4 == 0 && s5 == 0)) {
+      // Left sensors see line, right sensors don't
+      setMotors(baseSpeed, baseSpeed);
+      delay(preTurnDelay_ms);
+      turnUntilCenter(s1, s2, s4, s5);
+    } else if ((s5 == 1 || s4 == 1) && (s1 == 0 && s2 == 0)) {
+      // Right sensors see line, left sensors don't
+      setMotors(baseSpeed, baseSpeed);
+      delay(preTurnDelay_ms);
+      turnUntilCenter(s1, s2, s4, s5);
+    } else if ((s1 == 1 || s2 == 1) && (s4 == 1 || s5 == 1)) {
+      // Both sides see line, prefer left
+      setMotors(baseSpeed, baseSpeed);
+      delay(preTurnDelay_ms);
+      turnUntilCenter(s1, s2, s4, s5);
+    }
+    // After recovery, re-read sensors
+    s1 = digitalRead(S1);
+    s2 = digitalRead(S2);
+    s3 = digitalRead(S3);
+    s4 = digitalRead(S4);
+    s5 = digitalRead(S5);
+    if (lineType == 2) { 
+      s1 = !s1; s2 = !s2; s3 = !s3; s4 = !s4; s5 = !s5;
+    }
+  }
+
+  // ===== New error calculation (with lastError fallback) =====
+  int error = 0;
+  if (s1 == 1 && s2 == 0) error = -5;
+  else if (s1 == 1 && s2 == 1) error = -3;
+  else if (s2 == 1 && s3 == 0) error = -2;
+  else if (s2 == 1 && s3 == 1) error = -1;
+  else if (s3 == 1 && s2 == 0 && s4 == 0) error = 0;
+  else if (s3 == 1 && s4 == 1) error = 1;
+  else if (s4 == 1 && s3 == 0) error = 2;
+  else if (s4 == 1 && s5 == 1) error = 3;
+  else if (s5 == 1 && s4 == 0) error = 5;
+  else error = lastError; // fallback if no match
+
+  // ===== PID controller =====
+  integral += error;
+  float derivative = error - lastError;
+  float pid = Kp*error + Ki*integral + Kd*derivative;
+  lastError = error;
+
+  int leftSpeed = baseSpeed + pid;
+  int rightSpeed = baseSpeed - pid;
+
+  // Constrain speeds
+  leftSpeed = constrain(leftSpeed, -180, 180);     //150
+  rightSpeed = constrain(rightSpeed, -180, 180);
 
   // Set motors
-  setMotorSpeed(0, motorA_IN1, motorA_IN2, leftSpeed);
-  setMotorSpeed(1, motorB_IN3, motorB_IN4, rightSpeed);
+  setMotors(leftSpeed, rightSpeed);
 
-  lastError = error;
-  lastTime = now;
+  // --- Print for debug ---
+  // Serial.print("S1:"); Serial.print(s1);
+  // Serial.print(" S2:"); Serial.print(s2);
+  // Serial.print(" S3:"); Serial.print(s3);
+  // Serial.print(" S4:"); Serial.print(s4);
+  // Serial.print(" S5:"); Serial.print(s5);
+  // Serial.print(" | L:"); Serial.print(leftSpeed);
+  // Serial.print(" R:"); Serial.print(rightSpeed);
+  // Serial.print(" | err:"); Serial.print(error);
+  // Serial.print(" | PID:"); Serial.print(pid);
+  // Serial.print(" | LineType:"); Serial.println(lineType == 1 ? "Black" : "White");
 
-  // Detect track features (simple example using all sensors detection)
-  int sensorSum = 0;
-  for (int i = 0; i < 5; i++) {
-    sensorSum += digitalRead(sensorPins[i]);
-  }
-
-  // Example: all sensors on line -> possible circle or cross detected
-  if (invertLogic ? (sensorSum == 0) : (sensorSum == 5)) {
-    // Example action: slow down or turn accordingly to avoid
-    setMotorSpeed(0, motorA_IN1, motorA_IN2, 100);
-    setMotorSpeed(1, motorB_IN3, motorB_IN4, 100);
-    delay(100);
-  }
-
-  // Switch line color mode if needed (implement your own logic or external trigger)
-  // invertLogic = conditionToSwitchLineColor;
-
-  delay(10);
+  delay(50);
 }
