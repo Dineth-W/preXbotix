@@ -7,7 +7,7 @@ const char* ssid = "💀";              // <--- CHANGE THIS
 const char* password = "not123456";  // <--- CHANGE THIS
 
 
-#define AIN1 14
+#define AIN1 15
 #define AIN2 12
 #define PWMA 13
 #define BIN1 26
