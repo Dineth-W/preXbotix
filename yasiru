@@ -1,0 +1,211 @@
+
+// Analog IR + PID + Dead-End + Line Lost + Line Inversion
+// ==============================
+
+#include <Arduino.h>
+
+// ==============================
+// Pin definitions
+// ==============================
+const int sensorPins[5] = {34, 35, 32, 33, 25}; // analog pins for IR sensors
+const int motorA_PWM = 13;
+const int motorA_IN1 = 14;
+const int motorA_IN2 = 27;
+const int motorB_PWM = 33;
+const int motorB_IN1 = 26;
+const int motorB_IN2 = 25;
+
+// ==============================
+// PID constants
+// ==============================
+float Kp = 30.0;
+float Ki = 0.0;
+float Kd = 15.0;
+int maxSpeed = 200;
+
+// ==============================
+// Line tracking variables
+// ==============================
+float error = 0, lastError = 0, integral = 0;
+unsigned long lastTime = 0;
+
+// ==============================
+// Line lost / dead-end detection
+// ==============================
+unsigned long lineLostStart = 0;
+bool lineLostActive = false;
+const unsigned long lineLostDelay = 400; // ms
+
+// ==============================
+// Analog calibration values
+// ==============================
+int minVal[5] = {3000, 3000, 3000, 3000, 3000}; // white surface
+int maxVal[5] = {1000, 1000, 1000, 1000, 1000}; // black line
+
+// ==============================
+// Motor control function
+// ==============================
+void setMotor(int pwmPin, int in1, int in2, int speed) {
+    int dir = (speed >= 0) ? 1 : -1;
+    int pwmValue = abs(speed);
+    pwmValue = constrain(pwmValue, 0, maxSpeed);
+
+    if (dir == 1) {
+        digitalWrite(in1, HIGH);
+        digitalWrite(in2, LOW);
+    } else {
+        digitalWrite(in1, LOW);
+        digitalWrite(in2, HIGH);
+    }
+
+    ledcWrite(pwmPin, pwmValue);
+}
+
+// ==============================
+// Analog sensor read & weighted error
+// ==============================
+float readAnalogSensors() {
+    float weightedPos = 0;
+    float total = 0;
+
+    for (int i = 0; i < 5; i++) {
+        int val = analogRead(sensorPins[i]);
+        float normalized = (float)(val - minVal[i]) / (maxVal[i] - minVal[i]);
+        normalized = constrain(normalized, 0, 1);
+        normalized = 1 - normalized; // invert: black line = 1, white = 0
+
+        weightedPos += normalized * (i - 2); // -2..2
+        total += normalized;
+    }
+
+    if (total > 0) return weightedPos / total;
+    else return 999; // no line detected
+}
+
+// ==============================
+// Dead-end detection
+// ==============================
+bool checkDeadEnd() {
+    bool allBlack = true;
+    bool allWhite = true;
+    for (int i = 0; i < 5; i++) {
+        int val = analogRead(sensorPins[i]);
+        if (val > maxVal[i]) allBlack = false;
+        if (val < minVal[i]) allWhite = false;
+    }
+    return allBlack || allWhite;
+}
+
+// ==============================
+// Setup
+// ==============================
+void setup() {
+    Serial.begin(115200);
+
+    for (int i = 0; i < 5; i++) pinMode(sensorPins[i], INPUT);
+
+    pinMode(motorA_IN1, OUTPUT);
+    pinMode(motorA_IN2, OUTPUT);
+    pinMode(motorB_IN1, OUTPUT);
+    pinMode(motorB_IN2, OUTPUT);
+
+    ledcSetup(0, 20000, 8);
+    ledcSetup(1, 20000, 8);
+    ledcAttachPin(motorA_PWM, 0);
+    ledcAttachPin(motorB_PWM, 1);
+
+    Serial.println("Robot ready. Analog sensor PID control active.");
+}
+
+// ==============================
+// Main loop
+// ==============================
+void loop() {
+    unsigned long now = millis();
+    float dt = (now - lastTime) / 1000.0;
+    if (dt <= 0) dt = 0.001;
+
+    // ==============================
+    // 1️ Dead-end detection
+    // ==============================
+    if (checkDeadEnd()) {
+        Serial.println("DEAD-END DETECTED → STOP ROBOT");
+        setMotor(0, motorA_IN1, motorA_IN2, 0);
+        setMotor(1, motorB_IN1, motorB_IN2, 0);
+        return;
+    }
+
+    // ==============================
+    // 2️ Analog sensor read & line-lost detection
+    // ==============================
+    error = readAnalogSensors();
+
+    if (error == 999) { // no line detected
+        if (!lineLostActive) {
+            lineLostActive = true;
+            lineLostStart = now;
+            Serial.println("Line-lost detected → forward-check start");
+            setMotor(0, motorA_IN1, motorA_IN2, 100);
+            setMotor(1, motorB_IN1, motorB_IN2, 100);
+            return;
+        }
+
+        if (now - lineLostStart > lineLostDelay) {
+            Serial.println("Line-lost persists → 360° spin search");
+            if (lastError >= 0) {
+                setMotor(0, motorA_IN1, motorA_IN2, 120);
+                setMotor(1, motorB_IN1, motorB_IN2, -120);
+            } else {
+                setMotor(0, motorA_IN1, motorA_IN2, -120);
+                setMotor(1, motorB_IN1, motorB_IN2, 120);
+            }
+            return;
+        } else {
+            Serial.println("Moving forward slowly, line may reappear...");
+            return;
+        }
+    } else {
+        lineLostActive = false;
+    }
+
+    // ==============================
+    // 3️ PID Control
+    // ==============================
+    integral += error * dt;
+    float derivative = (error - lastError) / dt;
+
+    float output = Kp * error + Ki * integral + Kd * derivative;
+
+    int baseSpeed = 150;
+    int leftSpeed = baseSpeed + output;
+    int rightSpeed = baseSpeed - output;
+
+    leftSpeed = constrain(leftSpeed, -maxSpeed, maxSpeed);
+    rightSpeed = constrain(rightSpeed, -maxSpeed, maxSpeed);
+
+    setMotor(0, motorA_IN1, motorA_IN2, leftSpeed);
+    setMotor(1, motorB_IN1, motorB_IN2, rightSpeed);
+
+    // ==============================
+    // 4️ Line inversion detection
+    // ==============================
+    float sumLine = 0;
+    for (int i = 0; i < 5; i++)
+        sumLine += 1 - ((float)(analogRead(sensorPins[i]) - minVal[i]) / (maxVal[i] - minVal[i]));
+
+    if (sumLine > 0 && sumLine < 5) {
+        Serial.println("Line inversion detected → adjust carefully");
+    }
+
+    // ==============================
+    // Debug Serial Monitor
+    // ==============================
+    Serial.print("Weighted Error: "); Serial.print(error);
+    Serial.print(" | Left: "); Serial.print(leftSpeed);
+    Serial.print(" | Right: "); Serial.println(rightSpeed);
+
+    lastError = error;
+    lastTime = now;
+
+    delay(50); // loop timing
+}
